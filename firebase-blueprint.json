@@ -1,0 +1,243 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with preference settings and progression data",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique Firebase Authentication user ID"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Account email address"
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "User display name"
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "User avatar image URL"
+        },
+        "level": {
+          "type": "number",
+          "description": "Calculated user level"
+        },
+        "xp": {
+          "type": "number",
+          "description": "Experience points earned through completions"
+        },
+        "dailyGoalTime": {
+          "type": "string",
+          "description": "Preferred reminder hour in HH:MM format"
+        },
+        "soundEnabled": {
+          "type": "boolean",
+          "description": "Whether UI sound effects are enabled"
+        },
+        "notificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether push/in-app reminders are active"
+        },
+        "theme": {
+          "type": "string",
+          "enum": ["sage-garden", "lavender-calm", "warm-minimal", "ocean-mist", "dark", "charcoal", "midnight"],
+          "description": "Color theme selection"
+        },
+        "onboarded": {
+          "type": "boolean",
+          "description": "Whether initial onboarding was completed"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Account creation ISO timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update ISO timestamp"
+        }
+      },
+      "required": ["userId", "email"]
+    },
+    "Habit": {
+      "title": "Habit",
+      "description": "A habit item tracked by the user",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Unique habit ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Title of the habit"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional habit description or cue"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["health", "productivity", "learning", "mindfulness", "fitness", "creativity"],
+          "description": "Habit category"
+        },
+        "frequency": {
+          "type": "string",
+          "enum": ["daily", "weekly"],
+          "description": "Tracking frequency"
+        },
+        "targetDaysPerWeek": {
+          "type": "number",
+          "description": "Target days per week"
+        },
+        "timeOfDay": {
+          "type": "string",
+          "enum": ["morning", "afternoon", "evening", "anytime"],
+          "description": "Routine segment"
+        },
+        "streak": {
+          "type": "number",
+          "description": "Current consecutive streak"
+        },
+        "bestStreak": {
+          "type": "number",
+          "description": "All time best streak"
+        },
+        "completedToday": {
+          "type": "boolean",
+          "description": "Whether completed for current local date"
+        },
+        "archived": {
+          "type": "boolean",
+          "description": "Whether habit is archived"
+        },
+        "color": {
+          "type": "string",
+          "maxLength": 20,
+          "description": "Accent color hex or name"
+        },
+        "icon": {
+          "type": "string",
+          "maxLength": 50,
+          "description": "Icon identifier"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp updated"
+        }
+      },
+      "required": ["id", "userId", "title", "category"]
+    },
+    "HabitLog": {
+      "title": "HabitLog",
+      "description": "Historical completion record for a habit on a date",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Unique log document ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID"
+        },
+        "habitId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Associated habit ID"
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 10,
+          "description": "Date string YYYY-MM-DD"
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "Completion status"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional notes or reflection"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "ISO timestamp recorded"
+        }
+      },
+      "required": ["id", "userId", "habitId", "date", "completed"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Dialogue record with Ritho AI coach or voice interface",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Unique message ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant"],
+          "description": "Sender role"
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 4000,
+          "description": "Message text content"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["text", "voice"],
+          "description": "Input channel"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "ISO timestamp"
+        }
+      },
+      "required": ["id", "userId", "role", "content"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Private user profile and configuration"
+    },
+    "/users/{userId}/habits/{habitId}": {
+      "schema": "Habit",
+      "description": "User individual habit definitions"
+    },
+    "/users/{userId}/logs/{logId}": {
+      "schema": "HabitLog",
+      "description": "User completion logs by habit and date"
+    },
+    "/users/{userId}/chats/{chatId}": {
+      "schema": "ChatMessage",
+      "description": "User AI coach conversation history"
+    }
+  }
+}

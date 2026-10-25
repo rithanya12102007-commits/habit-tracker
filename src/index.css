@@ -1,0 +1,303 @@
+@import "tailwindcss";
+
+/* -------------------------------------------------------------
+   PEACEFUL VISUAL THEMES PALETTES
+   Boxes, cards, surfaces & accents adapt harmoniously
+   1. Sage Garden: Muted botanical green, warm ivory & sage
+   2. Lavender Calm: Pale lavender, lilac & soft white
+   3. Warm Minimal: Cream, sand & muted espresso brown
+   4. Ocean Mist: Mist blue, seafoam & muted teal
+   ------------------------------------------------------------- */
+
+:root,
+[data-theme="sage-garden"] {
+  --bg-app: #08110c;
+  --bg-surface: #0e1a14;
+  --bg-card: #13241b;
+  --bg-card-hover: #193125;
+  --bg-card-inner: #0b1711;
+  --bg-input: #0b1711;
+  --border-subtle: #224131;
+  --border-accent: #37664e;
+  --box-gradient: linear-gradient(135deg, #13251c 0%, #1a3326 50%, #102017 100%);
+  --box-gradient-subtle: linear-gradient(135deg, rgba(82, 183, 136, 0.12) 0%, rgba(19, 37, 28, 0.6) 100%);
+  --text-main: #f0f7f3;
+  --text-muted: #95b3a3;
+  --text-dim: #608271;
+  --accent-primary: #52b788;
+  --accent-primary-hover: #40916c;
+  --accent-glow: rgba(82, 183, 136, 0.35);
+  --accent-soft: rgba(82, 183, 136, 0.18);
+  --badge-bg: #1c382a;
+}
+
+[data-theme="lavender-calm"] {
+  --bg-app: #0d0b17;
+  --bg-surface: #141122;
+  --bg-card: #1c172e;
+  --bg-card-hover: #251f3e;
+  --bg-card-inner: #130f21;
+  --bg-input: #130f21;
+  --border-subtle: #372d5c;
+  --border-accent: #554589;
+  --box-gradient: linear-gradient(135deg, #1d1830 0%, #282042 50%, #171328 100%);
+  --box-gradient-subtle: linear-gradient(135deg, rgba(167, 139, 250, 0.12) 0%, rgba(28, 23, 46, 0.6) 100%);
+  --text-main: #f5f2fb;
+  --text-muted: #aba2c5;
+  --text-dim: #71678e;
+  --accent-primary: #a78bfa;
+  --accent-primary-hover: #906fe6;
+  --accent-glow: rgba(167, 139, 250, 0.35);
+  --accent-soft: rgba(167, 139, 250, 0.18);
+  --badge-bg: #2b2348;
+}
+
+[data-theme="warm-minimal"] {
+  --bg-app: #120f0d;
+  --bg-surface: #1a1613;
+  --bg-card: #221c17;
+  --bg-card-hover: #2d251f;
+  --bg-card-inner: #17130f;
+  --bg-input: #17130f;
+  --border-subtle: #45372d;
+  --border-accent: #665243;
+  --box-gradient: linear-gradient(135deg, #241e18 0%, #312821 50%, #1d1914 100%);
+  --box-gradient-subtle: linear-gradient(135deg, rgba(212, 163, 115, 0.12) 0%, rgba(34, 28, 23, 0.6) 100%);
+  --text-main: #f8f3ed;
+  --text-muted: #b9aba0;
+  --text-dim: #7c6f64;
+  --accent-primary: #d4a373;
+  --accent-primary-hover: #c4915f;
+  --accent-glow: rgba(212, 163, 115, 0.35);
+  --accent-soft: rgba(212, 163, 115, 0.18);
+  --badge-bg: #372c23;
+}
+
+[data-theme="ocean-mist"] {
+  --bg-app: #081119;
+  --bg-surface: #0e1a25;
+  --bg-card: #132434;
+  --bg-card-hover: #193046;
+  --bg-card-inner: #0b1621;
+  --bg-input: #0b1621;
+  --border-subtle: #23435e;
+  --border-accent: #37658c;
+  --box-gradient: linear-gradient(135deg, #132536 0%, #1b344a 50%, #101f2c 100%);
+  --box-gradient-subtle: linear-gradient(135deg, rgba(78, 168, 186, 0.12) 0%, rgba(19, 36, 52, 0.6) 100%);
+  --text-main: #f0f7fb;
+  --text-muted: #96b2c5;
+  --text-dim: #5c7b91;
+  --accent-primary: #4ea8ba;
+  --accent-primary-hover: #3b93a5;
+  --accent-glow: rgba(78, 168, 186, 0.35);
+  --accent-soft: rgba(78, 168, 186, 0.18);
+  --badge-bg: #1c364c;
+}
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background-color: var(--bg-app);
+    color: var(--text-main);
+    overflow-x: hidden;
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+}
+
+/* -------------------------------------------------------------
+   UNIVERSAL BOX & CARD THEME ADAPTATION
+   Transforms every card, hero box, widget & container
+   ------------------------------------------------------------- */
+
+[data-theme] {
+  background-color: var(--bg-app);
+  color: var(--text-main);
+}
+
+/* App Surfaces: Header, Sidebar, Backdrop */
+[data-theme] header,
+[data-theme] aside,
+[data-theme] .bg-\[\#0c0e17\],
+[data-theme] .bg-\[\#0c0e17\]\/85,
+[data-theme] .bg-\[\#090a0f\] {
+  background-color: var(--bg-surface) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+/* Primary Boxes & Cards across all views */
+[data-theme] .bg-\[\#121422\],
+[data-theme] .bg-\[\#141724\],
+[data-theme] .bg-\[\#111320\],
+[data-theme] .bg-\[\#131627\],
+[data-theme] .bg-\[\#161826\],
+[data-theme] .bg-\[\#191d30\],
+[data-theme] .bg-\[\#101918\]\/80,
+[data-theme] .bg-\[\#101918\] {
+  background-color: var(--bg-card) !important;
+  background-image: none !important;
+  border-color: var(--border-subtle) !important;
+}
+
+/* Inner Boxes, Stat Widgets, Search Bars & Inputs */
+[data-theme] .bg-\[\#181a29\],
+[data-theme] .bg-\[\#1a1e30\],
+[data-theme] .bg-\[\#191c2e\],
+[data-theme] .bg-\[\#181b2c\],
+[data-theme] .bg-\[\#1c1f30\],
+[data-theme] .bg-\[\#1f2233\],
+[data-theme] .bg-\[\#191b2c\],
+[data-theme] .bg-\[\#1a1c2c\],
+[data-theme] .bg-\[\#0e101a\]\/80,
+[data-theme] .bg-\[\#0f111c\],
+[data-theme] .bg-\[\#121420\],
+[data-theme] .bg-\[\#0a0c13\],
+[data-theme] .bg-neutral-900,
+[data-theme] .bg-neutral-900\/80,
+[data-theme] .bg-neutral-900\/90,
+[data-theme] .bg-neutral-800\/60,
+[data-theme] .bg-neutral-800\/70,
+[data-theme] .bg-neutral-800\/80 {
+  background-color: var(--bg-card-inner) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+/* Hero Banners & Gradient Boxes */
+[data-theme] .bg-gradient-to-r.from-\[\#171a2b\],
+[data-theme] .from-\[\#171a2b\],
+[data-theme] .from-\[\#131627\],
+[data-theme] .from-\[\#131625\],
+[data-theme] .from-\[\#121626\],
+[data-theme] .from-violet-950\/20,
+[data-theme] .from-violet-950\/40,
+[data-theme] .bg-gradient-to-b.from-\[\#131627\] {
+  background-image: var(--box-gradient) !important;
+  background-color: var(--bg-card) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+/* Card Hover States */
+[data-theme] .hover\:bg-\[\#1f2233\]:hover,
+[data-theme] .hover\:bg-\[\#1a1d2e\]:hover,
+[data-theme] .hover\:bg-\[\#1a1e30\]:hover,
+[data-theme] .hover\:bg-\[\#20243b\]:hover,
+[data-theme] .hover\:bg-neutral-800\/60:hover,
+[data-theme] .hover\:bg-neutral-800\/50:hover,
+[data-theme] .hover\:bg-neutral-800\/80:hover {
+  background-color: var(--bg-card-hover) !important;
+}
+
+/* Borders across all cards & panels */
+[data-theme] .border-neutral-800,
+[data-theme] .border-neutral-800\/80,
+[data-theme] .border-neutral-800\/60,
+[data-theme] .border-neutral-700,
+[data-theme] .border-neutral-700\/80,
+[data-theme] .border-neutral-700\/70,
+[data-theme] .border-violet-900\/30,
+[data-theme] .border-indigo-900\/30,
+[data-theme] .border-violet-500\/15,
+[data-theme] .border-violet-500\/20,
+[data-theme] .border-violet-500\/30 {
+  border-color: var(--border-subtle) !important;
+}
+
+/* Accent Buttons: Violet buttons transform to active theme accent */
+[data-theme] .bg-violet-600 {
+  background-color: var(--accent-primary) !important;
+  border-color: var(--accent-primary) !important;
+}
+
+[data-theme] .hover\:bg-violet-500:hover,
+[data-theme] .bg-violet-600:hover {
+  background-color: var(--accent-primary-hover) !important;
+  border-color: var(--accent-primary-hover) !important;
+}
+
+/* Text accents */
+[data-theme] .text-violet-400,
+[data-theme] .text-violet-300 {
+  color: var(--accent-primary) !important;
+}
+
+/* Soft accent pill backgrounds */
+[data-theme] .bg-violet-600\/20,
+[data-theme] .bg-violet-600\/10,
+[data-theme] .bg-violet-500\/10,
+[data-theme] .bg-violet-500\/20,
+[data-theme] .bg-indigo-600\/20 {
+  background-color: var(--accent-soft) !important;
+  color: var(--accent-primary) !important;
+  border-color: var(--border-accent) !important;
+}
+
+/* Primary Gradients on Action Buttons */
+[data-theme] .bg-gradient-to-r.from-violet-600,
+[data-theme] .bg-gradient-to-tr.from-violet-600 {
+  background-image: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%) !important;
+}
+
+/* Custom dark scrollbar matching theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-accent);
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 20px 4px var(--accent-glow);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 35px 8px var(--accent-glow);
+    transform: scale(1.03);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 2.8s infinite ease-in-out;
+}
+
+@keyframes ripple {
+  0% {
+    transform: scale(0.96);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 0.25;
+  }
+  100% {
+    transform: scale(0.96);
+    opacity: 0.7;
+  }
+}
+
+.animate-ripple {
+  animation: ripple 2.4s infinite ease-in-out;
+}
+
+@keyframes soundWave {
+  0%, 100% {
+    height: 6px;
+  }
+  50% {
+    height: 28px;
+  }
+}
+
+.sound-wave-bar {
+  animation: soundWave 1.2s infinite ease-in-out;
+}

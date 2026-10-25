@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_.-]+$');
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.userId == userId &&
+        data.email is string && data.email.size() <= 200 &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 200)) &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+        (!('level' in data) || data.level is number) &&
+        (!('xp' in data) || data.xp is number) &&
+        (!('dailyGoalTime' in data) || (data.dailyGoalTime is string && data.dailyGoalTime.size() <= 20)) &&
+        (!('soundEnabled' in data) || data.soundEnabled is bool) &&
+        (!('notificationsEnabled' in data) || data.notificationsEnabled is bool) &&
+        (!('theme' in data) || (data.theme is string && data.theme.size() <= 60)) &&
+        (!('onboarded' in data) || data.onboarded is bool);
+    }
+
+    function isValidHabit(data, userId) {
+      return data.userId == userId &&
+        data.id is string && data.id.size() <= 128 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1000)) &&
+        data.category is string && data.category.size() <= 60 &&
+        (!('frequency' in data) || (data.frequency is string && data.frequency.size() <= 60)) &&
+        (!('targetDaysPerWeek' in data) || data.targetDaysPerWeek is number) &&
+        (!('timeOfDay' in data) || (data.timeOfDay is string && data.timeOfDay.size() <= 60)) &&
+        (!('streak' in data) || data.streak is number) &&
+        (!('bestStreak' in data) || data.bestStreak is number) &&
+        (!('completedToday' in data) || data.completedToday is bool) &&
+        (!('archived' in data) || data.archived is bool) &&
+        (!('color' in data) || (data.color is string && data.color.size() <= 60)) &&
+        (!('icon' in data) || (data.icon is string && data.icon.size() <= 60));
+    }
+
+    function isValidHabitLog(data, userId) {
+      return data.userId == userId &&
+        data.id is string && data.id.size() <= 128 &&
+        data.habitId is string && data.habitId.size() <= 128 &&
+        data.date is string && data.date.size() <= 30 &&
+        data.completed is bool &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000));
+    }
+
+    function isValidChatMessage(data, userId) {
+      return data.userId == userId &&
+        data.id is string && data.id.size() <= 128 &&
+        data.role is string && data.role in ['user', 'assistant'] &&
+        data.content is string && data.content.size() <= 10000 &&
+        (!('source' in data) || (data.source is string && data.source in ['text', 'voice']));
+    }
+
+    // User profile document
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) && isValidUserProfile(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidUserProfile(request.resource.data, userId) && request.resource.data.userId == resource.data.userId;
+      allow delete: if isOwner(userId);
+
+      // Habits subcollection
+      match /habits/{habitId} {
+        allow get: if isOwner(userId) && isValidId(habitId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(habitId) && isValidHabit(request.resource.data, userId);
+        allow update: if isOwner(userId) && isValidId(habitId) && isValidHabit(request.resource.data, userId) && request.resource.data.userId == resource.data.userId;
+        allow delete: if isOwner(userId) && isValidId(habitId);
+      }
+
+      // Habit Logs subcollection
+      match /logs/{logId} {
+        allow get: if isOwner(userId) && isValidId(logId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(logId) && isValidHabitLog(request.resource.data, userId);
+        allow update: if isOwner(userId) && isValidId(logId) && isValidHabitLog(request.resource.data, userId) && request.resource.data.userId == resource.data.userId;
+        allow delete: if isOwner(userId) && isValidId(logId);
+      }
+
+      // Chats subcollection
+      match /chats/{chatId} {
+        allow get: if isOwner(userId) && isValidId(chatId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(chatId) && isValidChatMessage(request.resource.data, userId);
+        allow update: if isOwner(userId) && isValidId(chatId) && isValidChatMessage(request.resource.data, userId) && request.resource.data.userId == resource.data.userId;
+        allow delete: if isOwner(userId) && isValidId(chatId);
+      }
+    }
+
+    // Test connection document for initial boot test
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}

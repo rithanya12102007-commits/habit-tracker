@@ -1,0 +1,984 @@
+Apply ALL of the following changes exactly as written. Do not change anything else. Then run "npm install" (a new package is added) and make sure the app builds.
+
+SUMMARY:
+1. Live voice call with the AI coach (Gemini Live API, real-time talking, with a "Classic" fallback tab).
+2. Face Unlock (lock screen opened with your face, set up in the Profile page; face data stays on the device only).
+
+==================== package.json ====================
+Add this line inside "dependencies":
+    "@vladmandic/face-api": "^1.7.15",
+
+==================== CREATE NEW FILE: src/utils/pcmAudio.ts ====================
+// Small helpers to convert audio between the browser format (Float32) and the Live API format (16-bit PCM, base64)
+
+// Browser microphone audio -> lower sample rate (simple averaging)
+export function downsample(input: Float32Array, inRate: number, outRate: number): Float32Array {
+  if (inRate === outRate) return input;
+  const ratio = inRate / outRate;
+  const outLength = Math.floor(input.length / ratio);
+  const output = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.max(start + 1, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = start; j < end && j < input.length; j++) sum += input[j];
+    output[i] = sum / (end - start);
+  }
+  return output;
+}
+
+// Float32 (-1 to 1) -> base64 string of 16-bit PCM (little-endian)
+export function floatToPcm16Base64(samples: Float32Array): string {
+  const bytes = new Uint8Array(samples.length * 2);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+// base64 string of 16-bit PCM -> Float32 (-1 to 1)
+export function base64ToFloat32(base64: string): Float32Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const view = new DataView(bytes.buffer);
+  const samples = new Float32Array(Math.floor(bytes.length / 2));
+  for (let i = 0; i < samples.length; i++) {
+    samples[i] = view.getInt16(i * 2, true) / 0x8000;
+  }
+  return samples;
+}
+
+==================== CREATE NEW FILE: src/utils/liveVoice.ts ====================
+import { GoogleGenAI, Modality } from '@google/genai';
+import { auth } from '../lib/firebase';
+import { downsample, floatToPcm16Base64, base64ToFloat32 } from './pcmAudio';
+
+export type LiveStatus = 'idle' | 'connecting' | 'listening' | 'speaking' | 'error';
+
+export interface LiveCallbacks {
+  onStatus: (status: LiveStatus, message?: string) => void;
+  onUserText: (text: string) => void; // a piece of what the user said
+  onAiText: (text: string) => void; // a piece of what the AI said
+  onTurnComplete: () => void;
+}
+
+const INPUT_RATE = 16000; // microphone audio sent to Gemini
+const OUTPUT_RATE = 24000; // audio coming back from Gemini
+
+// One live voice call with the Gemini Live API
+export class LiveVoiceSession {
+  private session: any = null;
+  private micStream: MediaStream | null = null;
+  private micContext: AudioContext | null = null;
+  private micProcessor: ScriptProcessorNode | null = null;
+  private playContext: AudioContext | null = null;
+  private nextPlayTime = 0;
+  private playingSources: AudioBufferSourceNode[] = [];
+  private closed = false;
+
+  constructor(private callbacks: LiveCallbacks) {}
+
+  async start(systemInstruction: string, greeting: string) {
+    this.closed = false;
+    this.callbacks.onStatus('connecting');
+
+    try {
+      // 1. Ask our server for a short-lived key (only works when signed in)
+      const idToken = await auth.currentUser?.getIdToken();
+      if (!idToken) throw new Error('Please sign in with a real account to use live voice.');
+
+      const res = await fetch('/api/live/token', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Could not start live voice. Please try again.');
+      }
+      const { token, model } = await res.json();
+
+      // 2. Ask for the microphone
+      this.micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+
+      // 3. Connect to Gemini Live
+      const ai = new GoogleGenAI({ apiKey: token });
+      this.playContext = new AudioContext({ sampleRate: OUTPUT_RATE });
+
+      this.session = await ai.live.connect({
+        model,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          systemInstruction,
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+        },
+        callbacks: {
+          onopen: () => {},
+          onmessage: (message: any) => this.handleMessage(message),
+          onerror: (e: any) => this.fail(e?.message || 'Live voice connection error.'),
+          onclose: () => {
+            if (!this.closed) {
+              this.cleanup();
+              this.callbacks.onStatus('idle');
+            }
+          },
+        },
+      });
+
+      // 4. Start sending the microphone and let the coach say hello
+      this.startMicrophone();
+      this.callbacks.onStatus('listening');
+      this.session.sendRealtimeInput({ text: greeting });
+    } catch (err: any) {
+      const denied = err?.name === 'NotAllowedError';
+      this.fail(denied ? 'Microphone permission was blocked. Please allow it and try again.' : err?.message || 'Could not start live voice.');
+    }
+  }
+
+  stop() {
+    this.cleanup();
+    this.callbacks.onStatus('idle');
+  }
+
+  // ---------- Microphone -> Gemini ----------
+  private startMicrophone() {
+    if (!this.micStream) return;
+    this.micContext = new AudioContext();
+    const source = this.micContext.createMediaStreamSource(this.micStream);
+    // ScriptProcessor is old but simple and works in all browsers
+    this.micProcessor = this.micContext.createScriptProcessor(4096, 1, 1);
+
+    this.micProcessor.onaudioprocess = (event) => {
+      if (!this.session || this.closed) return;
+      const input = event.inputBuffer.getChannelData(0);
+      const samples = downsample(input, event.inputBuffer.sampleRate, INPUT_RATE);
+      this.session.sendRealtimeInput({
+        audio: { data: floatToPcm16Base64(samples), mimeType: `audio/pcm;rate=${INPUT_RATE}` },
+      });
+    };
+
+    source.connect(this.micProcessor);
+    this.micProcessor.connect(this.micContext.destination);
+  }
+
+  // ---------- Gemini -> speaker ----------
+  private handleMessage(message: any) {
+    const content = message?.serverContent;
+    if (!content) return;
+
+    // The user started talking while the AI was talking: stop the AI voice
+    if (content.interrupted) {
+      this.stopPlayback();
+      this.callbacks.onStatus('listening');
+    }
+
+    if (content.inputTranscription?.text) this.callbacks.onUserText(content.inputTranscription.text);
+    if (content.outputTranscription?.text) this.callbacks.onAiText(content.outputTranscription.text);
+
+    for (const part of content.modelTurn?.parts || []) {
+      if (part.inlineData?.data) this.playAudio(part.inlineData.data);
+    }
+
+    if (content.turnComplete) this.callbacks.onTurnComplete();
+  }
+
+  private playAudio(base64: string) {
+    const context = this.playContext;
+    if (!context || this.closed) return;
+
+    const samples = base64ToFloat32(base64);
+    const buffer = context.createBuffer(1, samples.length, OUTPUT_RATE);
+    buffer.getChannelData(0).set(samples);
+
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(context.destination);
+
+    // Play chunks one after another without gaps
+    const startAt = Math.max(context.currentTime, this.nextPlayTime);
+    source.start(startAt);
+    this.nextPlayTime = startAt + buffer.duration;
+
+    this.playingSources.push(source);
+    this.callbacks.onStatus('speaking');
+
+    source.onended = () => {
+      this.playingSources = this.playingSources.filter((s) => s !== source);
+      if (this.playingSources.length === 0 && !this.closed) {
+        this.callbacks.onStatus('listening');
+      }
+    };
+  }
+
+  private stopPlayback() {
+    for (const source of this.playingSources) {
+      try {
+        source.stop();
+      } catch {
+        // already stopped
+      }
+    }
+    this.playingSources = [];
+    this.nextPlayTime = 0;
+  }
+
+  // ---------- Close everything ----------
+  private fail(message: string) {
+    this.cleanup();
+    this.callbacks.onStatus('error', message);
+  }
+
+  private cleanup() {
+    this.closed = true;
+    this.stopPlayback();
+    try {
+      this.micProcessor?.disconnect();
+    } catch {
+      // ignore
+    }
+    this.micStream?.getTracks().forEach((track) => track.stop());
+    this.micContext?.close().catch(() => {});
+    this.playContext?.close().catch(() => {});
+    try {
+      this.session?.close();
+    } catch {
+      // ignore
+    }
+    this.session = null;
+    this.micProcessor = null;
+    this.micStream = null;
+    this.micContext = null;
+    this.playContext = null;
+  }
+}
+
+==================== CREATE NEW FILE: src/utils/faceLock.ts ====================
+// Face Unlock: the face is turned into 128 numbers and stored ONLY on this device (localStorage).
+// No photo and no face data is ever uploaded.
+
+const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/';
+const MATCH_DISTANCE = 0.5; // smaller = stricter (0.6 is the usual default)
+
+let faceApiPromise: Promise<any> | null = null;
+
+// Loads the face library and its models the first time they are needed
+async function getFaceApi() {
+  if (!faceApiPromise) {
+    faceApiPromise = (async () => {
+      const faceapi = await import('@vladmandic/face-api');
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+      ]);
+      return faceapi;
+    })().catch((err) => {
+      faceApiPromise = null; // allow retry
+      throw err;
+    });
+  }
+  return faceApiPromise;
+}
+
+// ---------- Camera ----------
+export async function startCamera(video: HTMLVideoElement): Promise<MediaStream> {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: 480, height: 360 },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+  return stream;
+}
+
+export function stopCamera(stream: MediaStream | null) {
+  stream?.getTracks().forEach((track) => track.stop());
+}
+
+// ---------- Read a face from the video (returns 128 numbers, or null if no face) ----------
+export async function readFace(video: HTMLVideoElement): Promise<number[] | null> {
+  const faceapi = await getFaceApi();
+  const result = await faceapi
+    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
+    .withFaceLandmarks()
+    .withFaceDescriptor();
+  return result ? Array.from(result.descriptor as Float32Array) : null;
+}
+
+// ---------- Saved face (per user, per device) ----------
+const faceKey = (uid: string) => `ritho_face_${uid}`;
+const unlockedKey = (uid: string) => `ritho_face_unlocked_${uid}`;
+
+export function hasSavedFace(uid: string): boolean {
+  try {
+    return !!localStorage.getItem(faceKey(uid));
+  } catch {
+    return false;
+  }
+}
+
+// Saves the average of several samples
+export function saveFace(uid: string, samples: number[][]) {
+  const average = samples[0].map((_, i) => samples.reduce((sum, s) => sum + s[i], 0) / samples.length);
+  localStorage.setItem(faceKey(uid), JSON.stringify(average));
+}
+
+export function removeFace(uid: string) {
+  localStorage.removeItem(faceKey(uid));
+  sessionStorage.removeItem(unlockedKey(uid));
+}
+
+function distance(a: number[], b: number[]): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += (a[i] - b[i]) ** 2;
+  return Math.sqrt(sum);
+}
+
+export function isSameFace(uid: string, face: number[]): boolean {
+  try {
+    const saved: number[] = JSON.parse(localStorage.getItem(faceKey(uid)) || 'null');
+    return !!saved && saved.length === face.length && distance(saved, face) < MATCH_DISTANCE;
+  } catch {
+    return false;
+  }
+}
+
+// ---------- "Unlocked in this browser tab" flag ----------
+export function isFaceUnlocked(uid: string): boolean {
+  try {
+    return sessionStorage.getItem(unlockedKey(uid)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setFaceUnlocked(uid: string) {
+  try {
+    sessionStorage.setItem(unlockedKey(uid), '1');
+  } catch {
+    // ignore
+  }
+}
+
+export function cameraErrorMessage(err: any): string {
+  if (err?.name === 'NotAllowedError') return 'Camera permission was blocked. Please allow the camera and try again.';
+  if (err?.name === 'NotFoundError') return 'No camera was found on this device.';
+  return 'Could not start face recognition. Please try again.';
+}
+
+==================== CREATE NEW FILE: src/components/voice/LiveVoiceView.tsx ====================
+import React, { useEffect, useRef, useState } from 'react';
+import { Phone, PhoneOff, AlertCircle, Headphones } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import { useHabits } from '../../context/HabitContext';
+import { LiveVoiceSession, LiveStatus } from '../../utils/liveVoice';
+import { VoiceChatView } from './VoiceChatView';
+
+interface Line {
+  id: number;
+  role: 'user' | 'ai';
+  text: string;
+  done: boolean;
+}
+
+const STATUS_TEXT: Record<LiveStatus, string> = {
+  idle: 'Tap the green button to start talking',
+  connecting: 'Connecting...',
+  listening: 'Listening... just talk',
+  speaking: 'Ritho AI is speaking...',
+  error: 'Something went wrong',
+};
+
+export const LiveVoiceView: React.FC = () => {
+  const { profile, isDemoUser } = useAuth();
+  const { habits, todayCompletionRate, currentBestStreak } = useHabits();
+
+  const [mode, setMode] = useState<'live' | 'classic'>(isDemoUser ? 'classic' : 'live');
+  const [status, setStatus] = useState<LiveStatus>('idle');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [lines, setLines] = useState<Line[]>([]);
+  const sessionRef = useRef<LiveVoiceSession | null>(null);
+  const lineId = useRef(0);
+
+  // Add a piece of text to the current line of that speaker (or start a new line)
+  const addText = (role: 'user' | 'ai', text: string) => {
+    setLines((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === role && !last.done) {
+        return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+      }
+      lineId.current += 1;
+      return [...prev, { id: lineId.current, role, text, done: false }];
+    });
+  };
+
+  const startCall = async () => {
+    setErrorMessage('');
+    setLines([]);
+
+    const habitList = habits.map((h) => `${h.title} (streak ${h.streak} days)`).join(', ') || 'no habits yet';
+    const systemInstruction =
+      `You are Ritho AI, a warm and encouraging voice habit coach, based on ideas from Atomic Habits and Tiny Habits. ` +
+      `You are talking out loud, so keep every answer short (1 to 3 sentences), natural and friendly. ` +
+      `Do not use lists, markdown or emojis. Ask at most one question at a time. ` +
+      `The user's name is ${profile?.displayName || 'my friend'}. Their habits: ${habitList}. ` +
+      `Today they completed ${todayCompletionRate}% of their habits. Best current streak: ${currentBestStreak} days.`;
+
+    const session = new LiveVoiceSession({
+      onStatus: (newStatus, message) => {
+        setStatus(newStatus);
+        if (newStatus === 'error') setErrorMessage(message || 'Live voice failed.');
+      },
+      onUserText: (text) => addText('user', text),
+      onAiText: (text) => addText('ai', text),
+      onTurnComplete: () => setLines((prev) => prev.map((l) => ({ ...l, done: true }))),
+    });
+
+    sessionRef.current = session;
+    await session.start(systemInstruction, 'Say a short friendly hello and ask how my habits are going today.');
+  };
+
+  const endCall = () => {
+    sessionRef.current?.stop();
+    sessionRef.current = null;
+  };
+
+  // Stop the call when leaving this screen
+  useEffect(() => {
+    return () => sessionRef.current?.stop();
+  }, []);
+
+  const switchMode = (newMode: 'live' | 'classic') => {
+    endCall();
+    setMode(newMode);
+  };
+
+  const inCall = status === 'connecting' || status === 'listening' || status === 'speaking';
+
+  return (
+    <div className="space-y-5 max-w-3xl mx-auto pb-16">
+      {/* Mode switch */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h1 className="text-lg font-bold text-white">Voice Coach</h1>
+        <div className="flex rounded-xl bg-[#121422] border border-neutral-800 p-1 text-xs font-semibold">
+          <button
+            type="button"
+            onClick={() => switchMode('live')}
+            disabled={isDemoUser}
+            className={`px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40 ${
+              mode === 'live' ? 'bg-violet-600 text-white' : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            Live call
+          </button>
+          <button
+            type="button"
+            onClick={() => switchMode('classic')}
+            className={`px-3 py-1.5 rounded-lg transition-colors ${
+              mode === 'classic' ? 'bg-violet-600 text-white' : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            Classic
+          </button>
+        </div>
+      </div>
+
+      {mode === 'classic' ? (
+        <>
+          {isDemoUser && (
+            <p className="text-xs text-neutral-400">Live call needs a real account. Demo mode uses the classic voice coach.</p>
+          )}
+          <VoiceChatView />
+        </>
+      ) : (
+        <div className="p-6 rounded-2xl bg-[#121422] border border-neutral-800 space-y-5">
+          <div className="flex flex-col items-center gap-4 py-4">
+            <div
+              className={`w-28 h-28 rounded-full flex items-center justify-center border-4 transition-all ${
+                status === 'speaking'
+                  ? 'border-violet-400 bg-violet-600/30 animate-pulse'
+                  : status === 'listening'
+                  ? 'border-emerald-400 bg-emerald-600/20 animate-pulse'
+                  : 'border-neutral-700 bg-[#181a29]'
+              }`}
+            >
+              {inCall ? <PhoneOff className="w-9 h-9 text-white" /> : <Phone className="w-9 h-9 text-neutral-300" />}
+            </div>
+
+            <p className="text-sm text-neutral-300">{STATUS_TEXT[status]}</p>
+
+            {inCall ? (
+              <button
+                type="button"
+                onClick={endCall}
+                className="px-6 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-sm font-semibold"
+              >
+                End call
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={startCall}
+                className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
+              >
+                Start live call
+              </button>
+            )}
+
+            <p className="text-[11px] text-neutral-500 flex items-center gap-1.5">
+              <Headphones className="w-3.5 h-3.5" /> Use headphones so the coach does not hear itself.
+            </p>
+          </div>
+
+          {errorMessage && (
+            <div className="flex items-start gap-2 p-3 rounded-xl bg-red-950/40 border border-red-500/30 text-xs text-red-200">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          {lines.length > 0 && (
+            <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+              {lines.map((line) => (
+                <div key={line.id} className={`flex ${line.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div
+                    className={`max-w-[85%] px-3.5 py-2 rounded-2xl text-xs leading-relaxed ${
+                      line.role === 'user' ? 'bg-violet-600 text-white' : 'bg-[#181a29] text-neutral-200 border border-neutral-800'
+                    }`}
+                  >
+                    {line.text}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+==================== CREATE NEW FILE: src/components/auth/FaceLockScreen.tsx ====================
+import React, { useEffect, useRef, useState } from 'react';
+import { ScanFace, KeyRound, RefreshCw } from 'lucide-react';
+import { startCamera, stopCamera, readFace, isSameFace, setFaceUnlocked, cameraErrorMessage } from '../../utils/faceLock';
+
+interface FaceLockScreenProps {
+  uid: string;
+  onUnlock: () => void;
+  onUsePassword: () => void;
+}
+
+const MAX_TRIES = 25;
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const FaceLockScreen: React.FC<FaceLockScreenProps> = ({ uid, onUnlock, onUsePassword }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [message, setMessage] = useState('Starting camera...');
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0); // change this number to scan again
+
+  useEffect(() => {
+    let cancelled = false;
+    let stream: MediaStream | null = null;
+
+    async function scan() {
+      setFailed(false);
+      try {
+        stream = await startCamera(videoRef.current!);
+        setMessage('Loading face recognition...');
+
+        for (let i = 0; i < MAX_TRIES && !cancelled; i++) {
+          const face = await readFace(videoRef.current!);
+          if (cancelled) return;
+          if (face && isSameFace(uid, face)) {
+            setFaceUnlocked(uid);
+            onUnlock();
+            return;
+          }
+          setMessage('Looking for your face...');
+          await wait(700);
+        }
+        if (!cancelled) {
+          setFailed(true);
+          setMessage('Face not recognized.');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setFailed(true);
+          setMessage(cameraErrorMessage(err));
+        }
+      }
+    }
+
+    scan();
+    return () => {
+      cancelled = true;
+      stopCamera(stream);
+    };
+  }, [uid, attempt]);
+
+  // Signing in with the password also counts as unlocked
+  const usePassword = () => {
+    setFaceUnlocked(uid);
+    onUsePassword();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-[#090a0f] flex flex-col items-center justify-center p-4 text-center">
+      <div className="w-full max-w-sm space-y-5">
+        <div className="flex items-center justify-center gap-2 text-violet-400 font-semibold">
+          <ScanFace className="w-5 h-5" /> Ritho AI is locked
+        </div>
+
+        <div className="relative mx-auto w-64 h-64 rounded-full overflow-hidden border-4 border-violet-500/60 bg-black">
+          <video ref={videoRef} muted playsInline className="w-full h-full object-cover -scale-x-100" />
+        </div>
+
+        <p className="text-sm text-neutral-300">{message}</p>
+
+        <div className="flex flex-col gap-2">
+          {failed && (
+            <button
+              type="button"
+              onClick={() => setAttempt((n) => n + 1)}
+              className="px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" /> Try again
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={usePassword}
+            className="px-4 py-2.5 rounded-xl bg-[#181a29] hover:bg-[#1f2233] border border-neutral-800 text-neutral-200 text-sm font-semibold flex items-center justify-center gap-2"
+          >
+            <KeyRound className="w-4 h-4" /> Use password instead
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+==================== CREATE NEW FILE: src/components/profile/FaceUnlockSettings.tsx ====================
+import React, { useEffect, useRef, useState } from 'react';
+import { ScanFace, CheckCircle2, Trash2 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import {
+  hasSavedFace,
+  saveFace,
+  removeFace,
+  readFace,
+  startCamera,
+  stopCamera,
+  setFaceUnlocked,
+  cameraErrorMessage,
+} from '../../utils/faceLock';
+
+const SAMPLES_NEEDED = 3;
+const MAX_TRIES = 25;
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const FaceUnlockSettings: React.FC = () => {
+  const { user, isDemoUser } = useAuth();
+  const uid = user?.uid || '';
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [enabled, setEnabled] = useState(() => hasSavedFace(uid));
+  const [scanning, setScanning] = useState(false);
+  const [message, setMessage] = useState('');
+
+  // Turn the camera off when leaving this screen
+  useEffect(() => {
+    return () => stopCamera(streamRef.current);
+  }, []);
+
+  const setup = async () => {
+    setScanning(true);
+    setMessage('Starting camera...');
+    try {
+      streamRef.current = await startCamera(videoRef.current!);
+      setMessage('Look straight at the camera...');
+
+      const samples: number[][] = [];
+      for (let i = 0; i < MAX_TRIES && samples.length < SAMPLES_NEEDED; i++) {
+        const face = await readFace(videoRef.current!);
+        if (face) {
+          samples.push(face);
+          setMessage(`Captured ${samples.length} of ${SAMPLES_NEEDED}. Keep still, slightly move your head...`);
+        }
+        await wait(900);
+      }
+
+      if (samples.length < SAMPLES_NEEDED) {
+        setMessage('Could not see your face clearly. Try again in better light.');
+      } else {
+        saveFace(uid, samples);
+        setFaceUnlocked(uid);
+        setEnabled(true);
+        setMessage('');
+      }
+    } catch (err) {
+      setMessage(cameraErrorMessage(err));
+    } finally {
+      stopCamera(streamRef.current);
+      streamRef.current = null;
+      setScanning(false);
+    }
+  };
+
+  const turnOff = () => {
+    removeFace(uid);
+    setEnabled(false);
+    setMessage('');
+  };
+
+  return (
+    <div className="p-6 rounded-2xl bg-[#121422] border border-neutral-800 space-y-4">
+      <h2 className="text-sm font-bold text-white flex items-center gap-2">
+        <ScanFace className="w-4 h-4 text-violet-400" />
+        <span>Face Unlock</span>
+      </h2>
+
+      <p className="text-xs text-neutral-400 leading-relaxed">
+        Lock Ritho AI on this device and open it with your face. Your face data stays on this device only. It is
+        never uploaded. Your password still protects your account, and a photo of you may be able to fool face
+        unlock, so treat it as a convenience lock.
+      </p>
+
+      <div className={scanning ? 'block' : 'hidden'}>
+        <div className="mx-auto w-48 h-48 rounded-full overflow-hidden border-4 border-violet-500/60 bg-black">
+          <video ref={videoRef} muted playsInline className="w-full h-full object-cover -scale-x-100" />
+        </div>
+      </div>
+
+      {message && <p className="text-xs text-neutral-300">{message}</p>}
+
+      {isDemoUser ? (
+        <p className="text-xs text-neutral-500">Not available in Demo Mode.</p>
+      ) : enabled ? (
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+            <CheckCircle2 className="w-4 h-4" /> Face Unlock is ON for this device
+          </span>
+          <button
+            type="button"
+            onClick={turnOff}
+            className="px-3 py-2 rounded-xl bg-[#181a29] hover:bg-[#1f2233] border border-neutral-800 text-xs font-semibold text-white flex items-center gap-1.5"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-red-400" /> Turn off and delete my face
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={setup}
+          disabled={scanning}
+          className="px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white text-xs font-semibold"
+        >
+          {scanning ? 'Scanning...' : 'Set up Face Unlock'}
+        </button>
+      )}
+    </div>
+  );
+};
+
+==================== REPLACE THE WHOLE FILE: server.ts ====================
+import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { handleCoachRequest, handleLiveTokenRequest } from './src/server/coachApi.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = Number(process.env.PORT) || 3000;
+
+// Needed on Cloud Run so req.ip is the real visitor IP (used for rate limiting)
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '50kb' }));
+
+app.post('/api/coach/chat', async (req, res) => {
+  try {
+    const result = await handleCoachRequest(req.body, req.headers.authorization, req.ip || 'unknown');
+    res.status(result.status).json(result.json);
+  } catch (error) {
+    console.error('API error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/live/token', async (req, res) => {
+  try {
+    const result = await handleLiveTokenRequest(req.headers.authorization);
+    res.status(result.status).json(result.json);
+  } catch (error) {
+    console.error('Live token error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Serve frontend build in production
+app.use(express.static(path.join(__dirname, 'dist')));
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Ritho AI production server listening on port ${PORT}`);
+});
+
+==================== EDIT FILE: src/server/geminiService.ts ====================
+Change this line:
+function getAiClient(): GoogleGenAI | null {
+to:
+export function getAiClient(): GoogleGenAI | null {
+
+==================== EDIT FILE: src/server/coachApi.ts ====================
+EDIT A: Replace the line
+import { generateCoachReply } from './geminiService';
+with:
+import { Modality } from '@google/genai';
+import { generateCoachReply, getAiClient } from './geminiService';
+
+EDIT B: Replace the line
+function isRateLimited(key: string): boolean {
+with:
+function isRateLimited(key: string, maxPerMinute: number = MAX_REQUESTS_PER_MINUTE): boolean {
+And inside that function replace
+  if (recent.length >= MAX_REQUESTS_PER_MINUTE) {
+with:
+  if (recent.length >= maxPerMinute) {
+
+EDIT C: Add this at the very END of the file:
+
+// ---------- Live voice: give a signed-in user a short-lived key for the Gemini Live API ----------
+const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
+
+export async function handleLiveTokenRequest(
+  authorizationHeader: string | undefined
+): Promise<CoachApiResponse> {
+  const token = authorizationHeader?.startsWith('Bearer ') ? authorizationHeader.slice(7) : '';
+  const userId = token ? await getUserIdFromToken(token) : null;
+
+  // Live voice costs more, so only real signed-in users can use it
+  if (!userId) {
+    return { status: 401, json: { error: 'Please sign in with a real account to use live voice.' } };
+  }
+
+  if (isRateLimited(`live:${userId}`, 6)) {
+    return { status: 429, json: { error: 'Too many live calls. Please wait a minute.' } };
+  }
+
+  const ai = getAiClient();
+  if (!ai) {
+    return { status: 503, json: { error: 'AI is not set up on the server (missing GEMINI_API_KEY).' } };
+  }
+
+  try {
+    const created = await ai.authTokens.create({
+      config: {
+        uses: 1, // one call per key
+        expireTime: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        newSessionExpireTime: new Date(Date.now() + 60 * 1000).toISOString(),
+        liveConnectConstraints: {
+          model: LIVE_MODEL,
+          config: { responseModalities: [Modality.AUDIO] },
+        },
+      },
+    });
+    return { status: 200, json: { token: created.name, model: LIVE_MODEL } };
+  } catch (error) {
+    console.error(`Could not create live voice token (model: ${LIVE_MODEL}):`, error);
+    return { status: 500, json: { error: 'Could not start live voice. Please try again later.' } };
+  }
+}
+
+==================== EDIT FILE: vite.config.ts ====================
+EDIT A: Replace the line
+import { handleCoachRequest } from './src/server/coachApi';
+with:
+import { handleCoachRequest, handleLiveTokenRequest } from './src/server/coachApi';
+
+EDIT B: Directly after the line
+      server.middlewares.use((req, res, next) => {
+insert:
+        if (req.url?.startsWith('/api/live/token') && req.method === 'POST') {
+          handleLiveTokenRequest(req.headers.authorization)
+            .then((result) => {
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = result.status;
+              res.end(JSON.stringify(result.json));
+            })
+            .catch((err) => {
+              console.error('Error handling /api/live/token:', err);
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'Failed to create live token' }));
+            });
+          return;
+        }
+
+==================== EDIT FILE: src/App.tsx ====================
+EDIT A: Replace the line
+import { VoiceChatView } from './components/voice/VoiceChatView';
+with these three lines:
+import { LiveVoiceView } from './components/voice/LiveVoiceView';
+import { FaceLockScreen } from './components/auth/FaceLockScreen';
+import { hasSavedFace, isFaceUnlocked } from './utils/faceLock';
+
+EDIT B: Replace the line
+  const { user, loading } = useAuth();
+with:
+  const { user, loading, logout } = useAuth();
+
+EDIT C: Directly under the line
+  const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
+add:
+  const [faceUnlockedUid, setFaceUnlockedUid] = useState<string | null>(null);
+
+EDIT D: Replace
+        return <VoiceChatView />;
+with:
+        return <LiveVoiceView />;
+
+EDIT E: Directly ABOVE the comment line
+  // Authenticated Protected Views
+add:
+  // Face Unlock: if the user turned it on for this device, show the lock screen first
+  const isDemo = user.uid.startsWith('demo_');
+  if (!isDemo && hasSavedFace(user.uid) && !isFaceUnlocked(user.uid) && faceUnlockedUid !== user.uid) {
+    return (
+      <FaceLockScreen
+        uid={user.uid}
+        onUnlock={() => setFaceUnlockedUid(user.uid)}
+        onUsePassword={logout}
+      />
+    );
+  }
+
+==================== EDIT FILE: src/components/profile/ProfileView.tsx ====================
+EDIT A: Under the line
+import { ThemeId } from '../../types';
+add:
+import { FaceUnlockSettings } from './FaceUnlockSettings';
+
+EDIT B: Directly ABOVE the comment line
+      {/* Account Security & Actions */}
+add:
+      <FaceUnlockSettings />
+
+==================== END ====================
+Keep everything else unchanged. The app already has CAMERA and MICROPHONE permissions in metadata.json.
